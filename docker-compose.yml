@@ -1,0 +1,60 @@
+services:
+  # Slack bot service
+  slack-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: simbot-slack
+    restart: no
+    env_file:
+      - .env
+    environment:
+      - ENABLE_SLACK=true
+      - ENABLE_MCP=false
+      - QUERY_DEFINITIONS_PATH=/app/queries
+    volumes:
+      - ./queries:/app/queries:ro
+      - ./logs:/app/logs
+    command: ["python", "-m", "simbot.main", "--slack"]
+    networks:
+      - simbot-network
+    depends_on:
+      - mcp-server
+
+  # MCP server service (HTTP/SSE for nginx reverse proxy)
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: simbot-mcp-server
+    restart: no
+    env_file:
+      - .env
+    environment:
+      - ENABLE_SLACK=false
+      - ENABLE_MCP=true
+      - MCP_TRANSPORT=http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8080
+      - QUERY_DEFINITIONS_PATH=/app/queries
+    volumes:
+      - ./queries:/app/queries:ro
+      - ./logs:/app/logs
+    ports:
+      - "8080:8080"
+    command: ["python", "-m", "simbot.main", "--mcp"]
+    networks:
+      - simbot-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  simbot-network:
+    driver: bridge
+
+volumes:
+  logs:
