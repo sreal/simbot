@@ -1,0 +1,37 @@
+# Example query definition
+# This file contains placeholders only. Do not include real schema/table names
+# or internal hostnames in public repos. Configure the connection string via
+# the environment variable key below (e.g., set `DBCONN_DEFAULT` in your local .env).
+# Keep credentials in `.env` (ignored by git). Use `.env.example` as a template.
+
+name: "Example Tool"
+description: "Demonstration query showing required fields and placeholders."
+trigger: "example tool"
+enabled: true
+
+mcp:
+  name: "example_tool"
+  group: "example_tools"
+  description: |
+    Example query that selects a small sample.
+    Usage: example tool <SearchTerm>
+    Returns: Id, Name
+
+# Explicit connection env var key (generic)
+credentials_env_key: "DBCONN_DEFAULT"
+
+# Optional logical database label; not security-sensitive
+database: "exampledb"
+
+sql: |
+  SELECT TOP 5 Id, Name
+  FROM <schema>.<table>
+  WHERE Name LIKE '%' || ? || '%'
+  ORDER BY Id DESC
+
+parameters:
+  - name: SearchTerm
+    type: string
+    required: true
+
+cache_ttl_seconds: 300
