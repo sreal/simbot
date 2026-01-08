@@ -4,10 +4,18 @@ SQL tools bot for Slack and MCP.
 
 ## Setup
 
-```bash
-cp .env.example .env
-# Configure tokens and connection strings
+### Quick Start
 
+1. Copy the environment template to `.env` and fill in your Slack tokens and any connection strings you plan to use.
+   - File: `.env.example` → `.env`
+2. Create a local `queries` directory for your query definitions.
+3. Copy the provided example query into your local `queries` directory to get started:
+   - Source: `examples/example_tool.yaml`
+   - Destination: `queries/example_tool.yaml`
+4. (Optional) Create a local `logs` directory for audit logs.
+5. Start the services:
+
+```bash
 docker-compose up
 ```
 

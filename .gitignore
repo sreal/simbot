@@ -52,7 +52,6 @@ Thumbs.db
 # Project specific
 .aider*
 .claude/
-uv.lock
 
 # Private queries (exclude definitions)
 queries/
