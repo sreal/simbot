@@ -63,6 +63,7 @@ COPY --chown=appuser:appuser pyproject.toml ./
 # Set Python to use the virtual environment
 ENV PATH="/app/.venv/bin:$PATH"
 ENV VIRTUAL_ENV=/app/.venv
+ENV PYTHONPATH=/app/src
 
 # Create logs directory
 RUN mkdir -p logs && chown appuser:appuser logs
