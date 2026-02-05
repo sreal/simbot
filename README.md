@@ -80,3 +80,7 @@ Add to Claude Desktop config (`~/.config/claude/claude_desktop_config.json`):
 uv sync --extra dev
 uv run pytest -v
 ```
+
+## Todo
+
+- [ ] Blob spec `return: content` does not return the file content to Slack (MCP works)

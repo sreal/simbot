@@ -66,10 +66,12 @@ class SlackBot:
         """
         from simbot.tools import EchoTool
         from simbot.interfaces.slack.tools.sql_tool import DomainSQLTool
+        from simbot.interfaces.slack.tools.blob_tool import DomainBlobTool
 
         return {
             "echo": EchoTool(),
             "domain_sql": DomainSQLTool(),
+            "domain_blob": DomainBlobTool(),
         }
 
     def _check_tool_availability(self):

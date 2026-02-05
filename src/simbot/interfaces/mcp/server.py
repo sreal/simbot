@@ -1,5 +1,5 @@
 """
-MCP server for exposing SQL queries as tools.
+MCP server for exposing SQL queries and blob checks as tools.
 Supports both stdio (for local clients like Claude Desktop) and HTTP/SSE (for remote access via nginx).
 """
 import sys
@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import atexit
+import base64
 from typing import Dict, Any
 import uuid
 
@@ -16,22 +17,31 @@ from mcp.server.stdio import stdio_server
 from mcp import types
 
 from simbot.sql_tools import QueryLoader, QueryExecutor, ExecutionContext
+from simbot.blob_tools import BlobCheckLoader, BlobCheckExecutor
 from .converters import YAMLToMCPConverter
+from .blob_converters import BlobToMCPConverter
 
 
 logger = logging.getLogger(__name__)
 
 
 class SQLQueryMCPServer:
-    """MCP server for SQL query tools."""
+    """MCP server for SQL query and blob check tools."""
 
     def __init__(self):
         self.server = Server("sql-query-server")
-        self.query_loader = QueryLoader()
-        self.executor = QueryExecutor()
-        self.converter = YAMLToMCPConverter()
 
-        # Convert all queries to MCP tools
+        # SQL tools
+        self.query_loader = QueryLoader()
+        self.sql_executor = QueryExecutor()
+        self.sql_converter = YAMLToMCPConverter()
+
+        # Blob tools
+        self.blob_loader = BlobCheckLoader()
+        self.blob_executor = BlobCheckExecutor()
+        self.blob_converter = BlobToMCPConverter()
+
+        # Convert all definitions to MCP tools
         self.tools = self._build_tools()
 
         # Register handlers
@@ -67,10 +77,22 @@ class SQLQueryMCPServer:
         logger.info("MCP server shutdown complete")
 
     def _build_tools(self) -> Dict[str, Dict[str, Any]]:
-        """Build MCP tools from query definitions."""
-        tools_list = self.converter.convert_all(self.query_loader.queries)
-        # Index by name for fast lookup
-        return {tool['name']: tool for tool in tools_list}
+        """Build MCP tools from query and blob check definitions."""
+        tools = {}
+
+        # SQL query tools
+        sql_tools = self.sql_converter.convert_all(self.query_loader.queries)
+        for tool in sql_tools:
+            tool['metadata']['tool_type'] = 'sql'
+            tools[tool['name']] = tool
+
+        # Blob check tools
+        blob_tools = self.blob_converter.convert_all(self.blob_loader.checks)
+        for tool in blob_tools:
+            tool['metadata']['tool_type'] = 'blob'
+            tools[tool['name']] = tool
+
+        return tools
 
     def _register_handlers(self):
         """Register MCP protocol handlers."""
@@ -92,7 +114,7 @@ class SQLQueryMCPServer:
             name: str,
             arguments: dict
         ) -> list[types.TextContent]:
-            """Execute a tool (SQL query)."""
+            """Execute a tool (SQL query or blob check)."""
 
             # Find tool metadata
             tool_def = self.tools.get(name)
@@ -104,47 +126,111 @@ class SQLQueryMCPServer:
                     text=json.dumps({'error': error_msg, 'success': False})
                 )]
 
-            # Get query definition
-            query_id = tool_def['metadata']['query_id']
-            query_def = self.query_loader.get_query_by_id(query_id)
-            if not query_def:
-                error_msg = f"Query not found: {query_id}"
-                logger.error(error_msg)
-                return [types.TextContent(
-                    type="text",
-                    text=json.dumps({'error': error_msg, 'success': False})
-                )]
-
             # Create execution context
             context = ExecutionContext(
                 correlation_id=str(uuid.uuid4()),
                 interface='mcp',
-                user_id='mcp_client'  # Could extract from MCP session metadata
+                user_id='mcp_client'
             )
 
-            # Execute query
-            result = self.executor.execute(query_def, arguments, context)
+            # Dispatch based on tool type
+            tool_type = tool_def['metadata'].get('tool_type', 'sql')
 
-            # Format response
-            if result.success:
-                response = {
-                    'success': True,
-                    'data': result.data,
-                    'metadata': result.metadata,
-                    'correlation_id': result.correlation_id,
-                }
+            if tool_type == 'blob':
+                return await self._execute_blob_tool(tool_def, arguments, context)
             else:
-                response = {
-                    'success': False,
-                    'error': result.error,
-                    'error_code': result.error_code,
-                    'correlation_id': result.correlation_id,
-                }
+                return await self._execute_sql_tool(tool_def, arguments, context)
 
+    async def _execute_sql_tool(
+        self,
+        tool_def: Dict[str, Any],
+        arguments: dict,
+        context: ExecutionContext
+    ) -> list[types.TextContent]:
+        """Execute a SQL query tool."""
+        query_id = tool_def['metadata']['query_id']
+        query_def = self.query_loader.get_query_by_id(query_id)
+        if not query_def:
+            error_msg = f"Query not found: {query_id}"
+            logger.error(error_msg)
             return [types.TextContent(
                 type="text",
-                text=json.dumps(response, indent=2, default=str)
+                text=json.dumps({'error': error_msg, 'success': False})
             )]
+
+        # Execute query
+        result = self.sql_executor.execute(query_def, arguments, context)
+
+        # Format response
+        if result.success:
+            response = {
+                'success': True,
+                'data': result.data,
+                'metadata': result.metadata,
+                'correlation_id': result.correlation_id,
+            }
+        else:
+            response = {
+                'success': False,
+                'error': result.error,
+                'error_code': result.error_code,
+                'correlation_id': result.correlation_id,
+            }
+
+        return [types.TextContent(
+            type="text",
+            text=json.dumps(response, indent=2, default=str)
+        )]
+
+    async def _execute_blob_tool(
+        self,
+        tool_def: Dict[str, Any],
+        arguments: dict,
+        context: ExecutionContext
+    ) -> list[types.TextContent]:
+        """Execute a blob check tool."""
+        check_id = tool_def['metadata']['check_id']
+        check_def = self.blob_loader.get_by_id(check_id)
+        if not check_def:
+            error_msg = f"Blob check not found: {check_id}"
+            logger.error(error_msg)
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({'error': error_msg, 'success': False})
+            )]
+
+        # Execute blob check
+        result = self.blob_executor.execute(check_def, arguments, context)
+
+        # Format response (convert file results to serializable format)
+        if result.success:
+            files_data = []
+            for f in result.files:
+                file_data = f.to_dict()
+                # Include base64 content if present
+                if f.content is not None:
+                    file_data['content_base64'] = base64.b64encode(f.content).decode('utf-8')
+                files_data.append(file_data)
+
+            response = {
+                'success': True,
+                'definition_name': result.definition_name,
+                'files': files_data,
+                'summary': result.summary,
+                'correlation_id': result.correlation_id,
+            }
+        else:
+            response = {
+                'success': False,
+                'error': result.error,
+                'error_code': result.error_code,
+                'correlation_id': result.correlation_id,
+            }
+
+        return [types.TextContent(
+            type="text",
+            text=json.dumps(response, indent=2, default=str)
+        )]
 
     async def run(self, transport='stdio', host='0.0.0.0', port=8080):
         """
@@ -282,16 +368,6 @@ class SQLQueryMCPServer:
                                 'error': {'code': -32602, 'message': f'Unknown tool: {tool_name}'}
                             })
 
-                        # Get query definition
-                        query_id = tool_def['metadata']['query_id']
-                        query_def = self.query_loader.get_query_by_id(query_id)
-                        if not query_def:
-                            return JSONResponse({
-                                'jsonrpc': '2.0',
-                                'id': message_id,
-                                'error': {'code': -32602, 'message': f'Query not found: {query_id}'}
-                            })
-
                         # Create execution context
                         context = ExecutionContext(
                             correlation_id=str(uuid.uuid4()),
@@ -299,24 +375,71 @@ class SQLQueryMCPServer:
                             user_id='mcp_http_client'
                         )
 
-                        # Execute query
-                        result = self.executor.execute(query_def, arguments, context)
+                        # Dispatch based on tool type
+                        tool_type = tool_def['metadata'].get('tool_type', 'sql')
 
-                        # Format response
-                        if result.success:
-                            response_data = {
-                                'success': True,
-                                'data': result.data,
-                                'metadata': result.metadata,
-                                'correlation_id': result.correlation_id,
-                            }
+                        if tool_type == 'blob':
+                            # Execute blob check
+                            check_id = tool_def['metadata']['check_id']
+                            check_def = self.blob_loader.get_by_id(check_id)
+                            if not check_def:
+                                return JSONResponse({
+                                    'jsonrpc': '2.0',
+                                    'id': message_id,
+                                    'error': {'code': -32602, 'message': f'Blob check not found: {check_id}'}
+                                })
+
+                            result = self.blob_executor.execute(check_def, arguments, context)
+
+                            if result.success:
+                                files_data = []
+                                for f in result.files:
+                                    file_data = f.to_dict()
+                                    if f.content is not None:
+                                        file_data['content_base64'] = base64.b64encode(f.content).decode('utf-8')
+                                    files_data.append(file_data)
+
+                                response_data = {
+                                    'success': True,
+                                    'definition_name': result.definition_name,
+                                    'files': files_data,
+                                    'summary': result.summary,
+                                    'correlation_id': result.correlation_id,
+                                }
+                            else:
+                                response_data = {
+                                    'success': False,
+                                    'error': result.error,
+                                    'error_code': result.error_code,
+                                    'correlation_id': result.correlation_id,
+                                }
                         else:
-                            response_data = {
-                                'success': False,
-                                'error': result.error,
-                                'error_code': result.error_code,
-                                'correlation_id': result.correlation_id,
-                            }
+                            # Execute SQL query
+                            query_id = tool_def['metadata']['query_id']
+                            query_def = self.query_loader.get_query_by_id(query_id)
+                            if not query_def:
+                                return JSONResponse({
+                                    'jsonrpc': '2.0',
+                                    'id': message_id,
+                                    'error': {'code': -32602, 'message': f'Query not found: {query_id}'}
+                                })
+
+                            result = self.sql_executor.execute(query_def, arguments, context)
+
+                            if result.success:
+                                response_data = {
+                                    'success': True,
+                                    'data': result.data,
+                                    'metadata': result.metadata,
+                                    'correlation_id': result.correlation_id,
+                                }
+                            else:
+                                response_data = {
+                                    'success': False,
+                                    'error': result.error,
+                                    'error_code': result.error_code,
+                                    'correlation_id': result.correlation_id,
+                                }
 
                         return JSONResponse({
                             'jsonrpc': '2.0',

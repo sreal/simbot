@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4.0"]
+azure = ["azure-storage-blob>=12.0.0"]
 
 [project.scripts]
 simbot = "simbot.interfaces.slack.bot:main"
