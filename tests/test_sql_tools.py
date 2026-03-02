@@ -4,7 +4,7 @@ import os
 import pytest
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from pydantic import ValidationError
 
 from simbot.sql_tools import (
@@ -15,6 +15,7 @@ from simbot.sql_tools import (
     ExecutionContext,
     QueryParameter,
 )
+from simbot.sql_tools.executor import DatabaseError
 
 
 # Sample YAML content for testing
@@ -438,3 +439,164 @@ class TestExecutionContext:
         )
         s = str(context)
         assert "unknown" in s
+
+
+class TestErrorBoundary:
+    """Tests for error boundary and safe error handling."""
+
+    def test_database_error_masks_details(self):
+        """Test that DatabaseError properly separates user and internal messages."""
+        correlation_id = "test-corr-123"
+        user_msg = "Database error occurred"
+        detailed_msg = "SELECT * FROM users WHERE password = 'leaked_pw_123'"
+        
+        error = DatabaseError(correlation_id, user_msg, detailed_msg)
+        
+        assert error.correlation_id == correlation_id
+        assert error.user_message == user_msg
+        assert error.detailed_message == detailed_msg
+        # User message should not contain detailed_msg
+        assert "leaked_pw_123" not in error.user_message
+
+    @patch("simbot.sql_tools.executor.PYODBC_AVAILABLE", True)
+    def test_database_connection_error_masked(self):
+        """Test that connection errors are masked in query result."""
+        executor = QueryExecutor()
+        query_def = QueryDefinition(
+            name="Test Query",
+            description="Test",
+            trigger="test",
+            database="testdb",
+            credentials_env_key="DB_TEST",
+            sql="SELECT * FROM test",
+            parameters=[],
+        )
+        context = ExecutionContext(correlation_id="test-123", interface="test")
+        
+        # Mock _get_connection to raise an error that should be masked
+        with patch.object(executor, '_get_connection') as mock_get_conn:
+            mock_get_conn.side_effect = Exception("ODBC connection to 'MyDB' failed: [28000] Invalid user")
+            result = executor.execute(query_def, {}, context)
+        
+        # Result should indicate failure
+        assert result.success is False
+        assert result.error_code == 'DATABASE_ERROR'
+        
+        # Error message should be generic, not leak ODBC details
+        assert "ODBC" not in result.error
+        assert "[28000]" not in result.error
+        assert "Invalid user" not in result.error
+        assert "contact support" in result.error.lower()
+        
+        # Correlation ID should be in metadata
+        assert result.metadata.get('correlation_id') == 'test-123'
+
+    @patch("simbot.sql_tools.executor.PYODBC_AVAILABLE", True)
+    def test_sql_execution_error_masked(self):
+        """Test that SQL execution errors are masked in query result."""
+        executor = QueryExecutor()
+        query_def = QueryDefinition(
+            name="Bad SQL Query",
+            description="Test",
+            trigger="test",
+            database="testdb",
+            credentials_env_key="DB_TEST",
+            sql="SELCT * FROM test",  # Typo intentional
+            parameters=[],
+        )
+        context = ExecutionContext(correlation_id="test-456", interface="test")
+        
+        # Mock _get_connection to return a mock connection that fails on execute
+        with patch.object(executor, '_get_connection') as mock_get_conn:
+            mock_cursor = MagicMock()
+            mock_cursor.execute.side_effect = Exception("Error parsing SQL: Syntax error near 'SELECT'")
+            mock_conn = MagicMock()
+            mock_conn.cursor.return_value = mock_cursor
+            mock_get_conn.return_value = mock_conn
+            
+            result = executor.execute(query_def, {}, context)
+        
+        # Result should indicate failure
+        assert result.success is False
+        assert result.error_code == 'DATABASE_ERROR'
+        
+        # Error message should be generic, not leak SQL syntax details
+        assert "Syntax error" not in result.error
+        assert "SELCT" not in result.error
+        assert "contact support" in result.error.lower()
+        
+        # Correlation ID should be in metadata
+        assert result.metadata.get('correlation_id') == 'test-456'
+
+    def test_error_result_includes_correlation_id_in_metadata(self):
+        """Test that all error results include correlation_id in metadata."""
+        executor = QueryExecutor()
+        query_def = QueryDefinition(
+            name="Test Query",
+            description="Test",
+            trigger="test",
+            database="testdb",
+            credentials_env_key="DB_TEST",
+            sql="SELECT * FROM test WHERE id = ?",
+            parameters=[{"name": "id", "type": "string", "required": True}],
+        )
+        context = ExecutionContext(correlation_id="error-test-789", interface="test")
+        
+        # Missing required parameter should produce error
+        result = executor.execute(query_def, {}, context)
+        
+        assert result.success is False
+        assert result.correlation_id == "error-test-789"
+        assert result.metadata.get('correlation_id') == "error-test-789"
+
+    def test_validation_error_includes_correlation_id(self):
+        """Test that validation errors include correlation_id."""
+        executor = QueryExecutor()
+        query_def = QueryDefinition(
+            name="Test Query",
+            description="Test",
+            trigger="test",
+            database="testdb",
+            credentials_env_key="DB_TEST",
+            sql="SELECT * FROM test WHERE id = ?",
+            parameters=[{"name": "id", "type": "int", "required": True}],
+        )
+        context = ExecutionContext(correlation_id="validation-test-123", interface="test")
+        
+        # Invalid integer parameter should produce validation error
+        result = executor.execute(query_def, {"id": "not_an_int"}, context)
+        
+        assert result.success is False
+        assert result.error_code == 'VALIDATION_ERROR'
+        assert result.correlation_id == "validation-test-123"
+        assert result.metadata.get('correlation_id') == "validation-test-123"
+
+    def test_success_result_from_cache(self):
+        """Test that cached success results work correctly."""
+        executor = QueryExecutor()
+        
+        # Create a query definition and build the correct cache key
+        query_def = QueryDefinition(
+            name="test",
+            description="Test",
+            trigger="test",
+            database="testdb",
+            credentials_env_key="DB_TEST",
+            sql="SELECT * FROM test",
+            parameters=[],
+            cache_ttl_seconds=60,
+        )
+        
+        # Build the cache key correctly (matches what execute() will do)
+        cache_key = executor._build_cache_key(query_def.name, {})
+        executor._cache_result(cache_key, [{"col": "value"}])
+        
+        context = ExecutionContext(correlation_id="success-test-123", interface="test")
+        
+        result = executor.execute(query_def, {}, context)
+        
+        # Success result from cache
+        assert result.success is True
+        assert result.correlation_id == "success-test-123"
+        assert result.data == [{"col": "value"}]
+        assert result.metadata.get('from_cache') is True
