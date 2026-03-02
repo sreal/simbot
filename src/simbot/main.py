@@ -12,19 +12,26 @@ logger = logging.getLogger(__name__)
 
 
 def setup_logging():
-    """Configure application logging."""
+    """Configure application logging.
+    
+    Environment variables:
+    - LOG_LEVEL: Logging level (default: INFO)
+    - LOG_TO_FILE: Enable file logging (default: true). When false, only log to stdout.
+    """
     log_level = os.getenv('LOG_LEVEL', 'INFO')
+    log_to_file = os.getenv('LOG_TO_FILE', 'true').lower() == 'true'
 
-    # Create logs directory if it doesn't exist
-    os.makedirs('logs', exist_ok=True)
+    handlers = [logging.StreamHandler(sys.stdout)]
+
+    if log_to_file:
+        # Create logs directory if it doesn't exist
+        os.makedirs('logs', exist_ok=True)
+        handlers.append(logging.FileHandler('logs/app.log'))
 
     logging.basicConfig(
         level=getattr(logging, log_level),
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-        handlers=[
-            logging.FileHandler('logs/app.log'),
-            logging.StreamHandler(sys.stdout)
-        ]
+        handlers=handlers
     )
 
 
@@ -103,16 +110,19 @@ def main():
     if args.slack:
         enable_slack = True
         enable_mcp = False
-        logger.info("Mode: Slack bot (from --slack flag)")
+        logger.info("Interface mode: Slack bot (from --slack flag)")
     elif args.mcp:
         enable_slack = False
         enable_mcp = True
-        logger.info("Mode: MCP server (from --mcp flag)")
+        logger.info("Interface mode: MCP server (from --mcp flag)")
     else:
         # Fall back to environment variables
         enable_slack = os.getenv('ENABLE_SLACK', 'false').lower() == 'true'
         enable_mcp = os.getenv('ENABLE_MCP', 'false').lower() == 'true'
-        logger.info("Mode: From environment variables")
+        logger.info(
+            f"Interface mode: From environment variables "
+            f"(ENABLE_SLACK={enable_slack}, ENABLE_MCP={enable_mcp})"
+        )
 
     if not enable_slack and not enable_mcp:
         logger.error(
@@ -131,11 +141,11 @@ def main():
         )
         sys.exit(1)
 
-    logger.info(f"Starting with Slack={enable_slack}, MCP={enable_mcp}")
-
     if enable_slack:
+        logger.info("Starting Slack interface...")
         run_slack_bot()  # Blocks
     elif enable_mcp:
+        logger.info("Starting MCP interface...")
         run_mcp_server()  # Blocks
 
 
