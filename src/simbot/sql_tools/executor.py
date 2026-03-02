@@ -137,15 +137,58 @@ class QueryExecutor:
     def _validate_parameters(
         self, query_def: QueryDefinition, params: dict
     ) -> Optional[str]:
-        """
-        Validate required parameters are present.
+        """Validate parameters against query definition.
+
+        Checks that:
+        - All required parameters are present
+        - Values conform to declared types (string/int/date)
+
         Returns error message if validation fails, None otherwise.
         """
-        required = [p.name for p in query_def.parameters if p.required]
-        missing = [p for p in required if p not in params]
+        required = [p for p in query_def.parameters if p.required]
+        missing = [p.name for p in required if p.name not in params]
 
         if missing:
-            return f"Missing required parameters: {', '.join(missing)}. {query_def.description}"
+            return (
+                "Missing required parameters: "
+                f"{', '.join(missing)}. {query_def.description}"
+            )
+
+        # Type validation
+        for p in query_def.parameters:
+            if p.name not in params:
+                continue  # optional and not provided
+
+            raw_value = params[p.name]
+
+            # Allow None only for non-required params
+            if raw_value is None and p.required:
+                return f"Parameter '{p.name}' is required and cannot be null."
+
+            if p.type == "int":
+                try:
+                    # Coerce to int so downstream always sees correct type
+                    params[p.name] = int(raw_value)
+                except (TypeError, ValueError):
+                    return f"Parameter '{p.name}' must be an integer."
+            elif p.type == "date":
+                # Accept YYYY-MM-DD strings
+                from datetime import datetime
+
+                try:
+                    if isinstance(raw_value, str):
+                        datetime.strptime(raw_value, "%Y-%m-%d")
+                    else:
+                        # Allow date/datetime objects; they are already validated
+                        str(raw_value)
+                except Exception:
+                    return (
+                        f"Parameter '{p.name}' must be a date in YYYY-MM-DD format."
+                    )
+            else:
+                # string - coerce everything to string for consistency
+                if raw_value is not None and not isinstance(raw_value, str):
+                    params[p.name] = str(raw_value)
 
         return None
 
