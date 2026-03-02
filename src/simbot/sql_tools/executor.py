@@ -21,6 +21,15 @@ logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("sql_tools_audit")
 
 
+class DatabaseError(Exception):
+    """Custom exception for database errors with masked user message."""
+    def __init__(self, correlation_id: str, user_message: str, detailed_message: str):
+        self.correlation_id = correlation_id
+        self.user_message = user_message
+        self.detailed_message = detailed_message
+        super().__init__(user_message)
+
+
 class QueryExecutor:
     """
     Stateless query executor with caching and connection management.
@@ -47,7 +56,7 @@ class QueryExecutor:
         context: Optional[ExecutionContext] = None
     ) -> QueryResult:
         """
-        Execute a query with correlation tracking.
+        Execute a query with correlation tracking and error boundary.
 
         Args:
             query_def: Validated query definition
@@ -88,12 +97,13 @@ class QueryExecutor:
                     success=False,
                     error=validation_error,
                     error_code='VALIDATION_ERROR',
+                    metadata={'correlation_id': context.correlation_id},
                     correlation_id=context.correlation_id
                 )
 
             # Execute query
             start_time = datetime.now(UTC)
-            rows = self._execute_sql(query_def, params)
+            rows = self._execute_sql(query_def, params, context)
             execution_time = (datetime.now(UTC) - start_time).total_seconds()
 
             # Convert to list of dicts or None
@@ -122,7 +132,20 @@ class QueryExecutor:
 
             return result
 
+        except DatabaseError as e:
+            # Database error - log detailed error internally, return generic message
+            logger.error(f"{context} Database error: {e.detailed_message}", exc_info=True)
+            self._audit_log(context, query_def, params, success=False, error=e.detailed_message)
+
+            return QueryResult(
+                success=False,
+                error=e.user_message,
+                error_code='DATABASE_ERROR',
+                metadata={'correlation_id': context.correlation_id},
+                correlation_id=context.correlation_id
+            )
         except Exception as e:
+            # Other errors (validation, configuration, etc.)
             error_msg = f"Query execution failed: {str(e)}"
             logger.error(f"{context} {error_msg}", exc_info=True)
             self._audit_log(context, query_def, params, success=False, error=str(e))
@@ -131,6 +154,7 @@ class QueryExecutor:
                 success=False,
                 error=error_msg,
                 error_code='EXECUTION_ERROR',
+                metadata={'correlation_id': context.correlation_id},
                 correlation_id=context.correlation_id
             )
 
@@ -192,60 +216,94 @@ class QueryExecutor:
 
         return None
 
-    def _execute_sql(self, query_def: QueryDefinition, params: dict) -> List[dict]:
-        """Execute SQL query and return rows as list of dicts."""
+    def _execute_sql(self, query_def: QueryDefinition, params: dict, 
+                     context: Optional[ExecutionContext] = None) -> List[dict]:
+        """
+        Execute SQL query and return rows as list of dicts.
+        
+        Wraps database errors to prevent leaking internal DB/pyodbc error details.
+        """
         if not PYODBC_AVAILABLE:
             raise RuntimeError("pyodbc not installed - cannot execute SQL queries")
 
-        # Get database connection
-        conn = self._get_connection(
-            query_def.database, query_def.credentials_env_key
-        )
-
-        # Execute query
-        cursor = conn.cursor()
-
-        # Count ? placeholders in SQL
-        placeholder_count = query_def.sql.count('?')
-
-        # Get parameter values in order
-        param_names = [p.name for p in query_def.parameters]
-
-        # Simple 1:1 mapping - placeholders must match parameters
-        if placeholder_count == 0 and len(param_names) == 0:
-            # No parameters needed
-            param_values = ()
-        elif placeholder_count == len(param_names):
-            # Expected case: one placeholder per parameter
-            param_values = tuple(params.get(name) for name in param_names)
-        else:
-            # Mismatch - fail fast with clear error
-            raise ValueError(
-                f"Query '{query_def.name}': SQL has {placeholder_count} placeholders "
-                f"but {len(param_names)} parameters defined. "
-                f"Each parameter should have exactly one placeholder (?)."
+        # Create a minimal context for error handling if not provided
+        if context is None:
+            context = ExecutionContext(
+                correlation_id=str(uuid.uuid4()),
+                interface='internal'
             )
 
-        cursor.execute(query_def.sql, param_values)
+        # Get database connection
+        try:
+            conn = self._get_connection(
+                query_def.database, query_def.credentials_env_key
+            )
+        except Exception as e:
+            detailed_msg = f"Failed to establish database connection: {str(e)}"
+            user_msg = "Database connection error. Please contact support with correlation ID."
+            raise DatabaseError(context.correlation_id, user_msg, detailed_msg) from e
 
-        # Fetch results
-        columns = [desc[0] for desc in cursor.description]
-        rows = cursor.fetchall()
+        # Execute query
+        cursor = None
+        try:
+            cursor = conn.cursor()
 
-        # Convert to list of dicts
-        result = []
-        for row in rows:
-            row_dict = {}
-            for i, col in enumerate(columns):
-                value = row[i]
-                # Convert datetime to string for JSON serialization
-                if isinstance(value, datetime):
-                    value = value.isoformat()
-                row_dict[col] = value
-            result.append(row_dict)
+            # Count ? placeholders in SQL
+            placeholder_count = query_def.sql.count('?')
 
-        cursor.close()
-        return result
+            # Get parameter values in order
+            param_names = [p.name for p in query_def.parameters]
+
+            # Simple 1:1 mapping - placeholders must match parameters
+            if placeholder_count == 0 and len(param_names) == 0:
+                # No parameters needed
+                param_values = ()
+            elif placeholder_count == len(param_names):
+                # Expected case: one placeholder per parameter
+                param_values = tuple(params.get(name) for name in param_names)
+            else:
+                # Mismatch - fail fast with clear error
+                raise ValueError(
+                    f"Query '{query_def.name}': SQL has {placeholder_count} placeholders "
+                    f"but {len(param_names)} parameters defined. "
+                    f"Each parameter should have exactly one placeholder (?)."
+                )
+
+            cursor.execute(query_def.sql, param_values)
+
+            # Fetch results
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+
+            # Convert to list of dicts
+            result = []
+            for row in rows:
+                row_dict = {}
+                for i, col in enumerate(columns):
+                    value = row[i]
+                    # Convert datetime to string for JSON serialization
+                    if isinstance(value, datetime):
+                        value = value.isoformat()
+                    row_dict[col] = value
+                result.append(row_dict)
+
+            return result
+            
+        except DatabaseError:
+            # Re-raise our custom error as-is
+            raise
+        except Exception as e:
+            # Wrap database/pyodbc errors to hide implementation details
+            # (catches both pyodbc.Error and other exceptions)
+            detailed_msg = f"Database execution error for query '{query_def.name}': {str(e)}"
+            user_msg = "Database query error. Please contact support with correlation ID."
+            raise DatabaseError(context.correlation_id, user_msg, detailed_msg) from e
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception as e:
+                    logger.warning(f"Error closing cursor: {e}")
 
     def _get_connection(self, database: str, credentials_env_key: str) -> Any:
         """
