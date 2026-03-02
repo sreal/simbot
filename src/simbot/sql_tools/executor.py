@@ -370,34 +370,61 @@ class QueryExecutor:
         return f"{query_name}:{param_str}"
 
     def _check_cache(self, cache_key: str, ttl_seconds: int) -> Optional[dict]:
-        """Check if cached result is still valid."""
+        """Check if cached result is still valid.
+        
+        Logs cache hit/miss with cache_key and current cache size.
+        """
         if ttl_seconds <= 0:
+            logger.debug(
+                f"Cache bypass (TTL={ttl_seconds}): {cache_key} "
+                f"(cache_size={len(self.cache)})"
+            )
             return None
 
         if cache_key not in self.cache:
+            logger.debug(
+                f"Cache miss: {cache_key} "
+                f"(cache_size={len(self.cache)})"
+            )
             return None
 
         cached = self.cache[cache_key]
         age = time.time() - cached["timestamp"]
 
         if age < ttl_seconds:
+            logger.debug(
+                f"Cache hit: {cache_key} "
+                f"(age={age:.2f}s, ttl={ttl_seconds}s, cache_size={len(self.cache)})"
+            )
             return cached
 
         # Expired - remove from both cache and order tracking
+        logger.debug(
+            f"Cache expired: {cache_key} "
+            f"(age={age:.2f}s, ttl={ttl_seconds}s, cache_size={len(self.cache)})"
+        )
         del self.cache[cache_key]
         if cache_key in self.cache_order:
             self.cache_order.remove(cache_key)
         return None
 
     def _cache_result(self, cache_key: str, data: List[dict]):
-        """Cache query result with FIFO eviction."""
+        """Cache query result with FIFO eviction.
+        
+        Logs cache operation with cache_key, current cache size, and eviction details if applicable.
+        """
         # Evict oldest entry if cache is full
+        eviction_msg = ""
         if len(self.cache) >= self.MAX_CACHE_SIZE:
             if self.cache_order:
                 oldest_key = self.cache_order.pop(0)
                 if oldest_key in self.cache:
                     del self.cache[oldest_key]
-                    logger.debug(f"Evicted oldest cache entry: {oldest_key}")
+                    eviction_msg = f" (evicted_key={oldest_key})"
+                    logger.debug(
+                        f"Cache eviction (FIFO): {oldest_key} "
+                        f"(cache_size_before={len(self.cache) + 1})"
+                    )
 
         timestamp = time.time()
         self.cache[cache_key] = {"data": data, "timestamp": timestamp}
@@ -406,7 +433,10 @@ class QueryExecutor:
         if cache_key not in self.cache_order:
             self.cache_order.append(cache_key)
 
-        logger.debug(f"Cached result: {cache_key} (cache size: {len(self.cache)})")
+        logger.debug(
+            f"Cache result stored: {cache_key} "
+            f"(cache_size={len(self.cache)}/max={self.MAX_CACHE_SIZE}){eviction_msg}"
+        )
 
     def _audit_log(self, context: ExecutionContext, query_def: QueryDefinition,
                    params: dict, success: bool, row_count: int = 0, error: Optional[str] = None):
