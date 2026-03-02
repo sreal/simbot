@@ -228,7 +228,72 @@ class TestQueryExecutor:
             parameters=[{"name": "id", "type": "string", "required": True}],
         )
 
-        error = executor._validate_parameters(query_def, {"id": "123"})
+        params = {"id": "123"}
+        error = executor._validate_parameters(query_def, params)
+        assert error is None
+        # string type should be preserved
+        assert params["id"] == "123"
+
+    def test_validate_parameters_int_type(self):
+        """Test validation enforces integer type and coercion."""
+        executor = QueryExecutor()
+        query_def = QueryDefinition(
+            name="Test",
+            description="Test",
+            trigger="test",
+            database="db",
+            credentials_env_key="DB_TEST",
+            sql="SELECT * FROM test WHERE id = ?",
+            parameters=[{"name": "id", "type": "int", "required": True}],
+        )
+
+        params = {"id": "123"}
+        error = executor._validate_parameters(query_def, params)
+        assert error is None
+        assert isinstance(params["id"], int)
+        assert params["id"] == 123
+
+        bad_params = {"id": "abc"}
+        error = executor._validate_parameters(query_def, bad_params)
+        assert error is not None
+        assert "must be an integer" in error
+
+    def test_validate_parameters_date_type(self):
+        """Test validation enforces date format."""
+        executor = QueryExecutor()
+        query_def = QueryDefinition(
+            name="Test",
+            description="Test",
+            trigger="test",
+            database="db",
+            credentials_env_key="DB_TEST",
+            sql="SELECT * FROM test WHERE d = ?",
+            parameters=[{"name": "d", "type": "date", "required": True}],
+        )
+
+        params = {"d": "2024-01-02"}
+        error = executor._validate_parameters(query_def, params)
+        assert error is None
+
+        bad_params = {"d": "01/02/2024"}
+        error = executor._validate_parameters(query_def, bad_params)
+        assert error is not None
+        assert "YYYY-MM-DD" in error
+
+    def test_validate_parameters_optional_missing(self):
+        """Test optional parameters can be omitted."""
+        executor = QueryExecutor()
+        query_def = QueryDefinition(
+            name="Test",
+            description="Test",
+            trigger="test",
+            database="db",
+            credentials_env_key="DB_TEST",
+            sql="SELECT * FROM test WHERE id = ?",
+            parameters=[{"name": "id", "type": "string", "required": False}],
+        )
+
+        error = executor._validate_parameters(query_def, {})
         assert error is None
 
     @patch("simbot.sql_tools.executor.PYODBC_AVAILABLE", False)
