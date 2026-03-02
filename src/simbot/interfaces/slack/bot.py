@@ -2,6 +2,8 @@
 
 import logging
 import re
+import signal
+import atexit
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
@@ -22,6 +24,7 @@ class SlackBot:
             config: Config object with tokens
         """
         self.config = config
+        self._shutdown_handlers = []
 
         # Initialize Slack client wrapper
         self.slack_client = SlackClient(config.slack_bot_token)
@@ -48,6 +51,9 @@ class SlackBot:
 
         # Check tool availability
         self._check_tool_availability()
+        
+        # Collect QueryExecutor instances from tools for cleanup
+        self._collect_executors()
 
         logger.info("Bot initialized successfully")
 
@@ -79,6 +85,30 @@ class SlackBot:
                 logger.warning(f"✗ {name}: {status['reason']}")
                 if status["error"]:
                     logger.warning(f"  Error: {status['error']}")
+
+    def _collect_executors(self):
+        """Collect QueryExecutor instances from tools for cleanup on shutdown."""
+        self._executors = []
+        
+        for tool in self.tools.values():
+            # Check if tool has an executor attribute
+            if hasattr(tool, 'executor'):
+                self._executors.append(tool.executor)
+                logger.debug(f"Registered executor from tool for cleanup")
+    
+    def shutdown(self):
+        """Clean up resources on shutdown."""
+        logger.info("Shutting down Slack bot...")
+        
+        # Close database connections
+        for executor in self._executors:
+            try:
+                executor.close_connections()
+                logger.info("Closed database connections")
+            except Exception as e:
+                logger.error(f"Error closing database connections: {e}", exc_info=True)
+        
+        logger.info("Slack bot shutdown complete")
 
     def _show_help(self, event, say, thread_ts=None):
         """Show available commands from all tools."""
@@ -220,6 +250,16 @@ class SlackBot:
     def start(self):
         """Start the bot using Socket Mode (WebSocket connection)."""
         logger.info("Starting bot in Socket Mode...")
+        
+        # Register shutdown handlers for graceful cleanup
+        def signal_handler(signum, frame):
+            logger.info(f"Received signal {signum}, initiating shutdown...")
+            self.shutdown()
+            exit(0)
+        
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        atexit.register(self.shutdown)
 
         handler = SocketModeHandler(
             app=self.app,

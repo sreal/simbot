@@ -6,6 +6,8 @@ import sys
 import json
 import logging
 import os
+import signal
+import atexit
 from typing import Dict, Any
 import uuid
 
@@ -34,8 +36,35 @@ class SQLQueryMCPServer:
 
         # Register handlers
         self._register_handlers()
+        
+        # Register shutdown cleanup
+        self._register_shutdown_handlers()
 
         logger.info(f"MCP Server initialized with {len(self.tools)} tools")
+    
+    def _register_shutdown_handlers(self):
+        """Register signal handlers and atexit for graceful shutdown."""
+        def signal_handler(signum, frame):
+            logger.info(f"Received signal {signum}, initiating shutdown...")
+            self.shutdown()
+            exit(0)
+        
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        atexit.register(self.shutdown)
+    
+    def shutdown(self):
+        """Clean up resources on shutdown."""
+        logger.info("Shutting down MCP server...")
+        
+        # Close database connections
+        try:
+            self.executor.close_connections()
+            logger.info("Closed database connections")
+        except Exception as e:
+            logger.error(f"Error closing database connections: {e}", exc_info=True)
+        
+        logger.info("MCP server shutdown complete")
 
     def _build_tools(self) -> Dict[str, Dict[str, Any]]:
         """Build MCP tools from query definitions."""
