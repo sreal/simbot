@@ -107,45 +107,30 @@ class DomainSQLTool(Tool):
         return "\n".join(parts)
 
     def _format_table(self, rows: List[Dict]) -> str:
-        """Format rows as ASCII table."""
+        """Format rows as CSV."""
         if not rows:
             return "No results"
 
         # Get column names from first row
         columns = list(rows[0].keys())
 
-        # Calculate column widths
-        widths = {}
-        for col in columns:
-            widths[col] = len(col)
-            for row in rows:
-                value_str = str(row[col]) if row[col] is not None else ""
-                widths[col] = max(widths[col], len(value_str))
-
-        # Build table
+        # Build CSV
         lines = []
 
-        # Header
-        header = "| " + " | ".join(col.ljust(widths[col]) for col in columns) + " |"
-        separator = "+-" + "-+-".join("-" * widths[col] for col in columns) + "-+"
+        # Header row
+        lines.append(",".join(columns))
 
-        lines.append(separator)
-        lines.append(header)
-        lines.append(separator)
-
-        # Rows
+        # Data rows
         for row in rows:
             values = []
             for col in columns:
                 value = row[col]
                 value_str = str(value) if value is not None else ""
-                values.append(value_str.ljust(widths[col]))
-            lines.append("| " + " | ".join(values) + " |")
+                values.append(value_str)
+            lines.append(",".join(values))
 
-        lines.append(separator)
-
-        table = "\n".join(lines)
-        return f"```\n{table}\n```"
+        csv_data = "\n".join(lines)
+        return f"```\n{csv_data}\n```"
 
     def register_handlers(self, bot):
         """Register Slack command handlers."""
