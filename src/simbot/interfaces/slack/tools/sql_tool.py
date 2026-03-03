@@ -107,45 +107,30 @@ class DomainSQLTool(Tool):
         return "\n".join(parts)
 
     def _format_table(self, rows: List[Dict]) -> str:
-        """Format rows as ASCII table."""
+        """Format rows as CSV with proper quoting."""
         if not rows:
             return "No results"
+
+        import io
+        import csv
 
         # Get column names from first row
         columns = list(rows[0].keys())
 
-        # Calculate column widths
-        widths = {}
-        for col in columns:
-            widths[col] = len(col)
-            for row in rows:
-                value_str = str(row[col]) if row[col] is not None else ""
-                widths[col] = max(widths[col], len(value_str))
+        # Build CSV with proper quoting
+        output = io.StringIO()
+        writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
 
-        # Build table
-        lines = []
+        # Header row
+        writer.writerow(columns)
 
-        # Header
-        header = "| " + " | ".join(col.ljust(widths[col]) for col in columns) + " |"
-        separator = "+-" + "-+-".join("-" * widths[col] for col in columns) + "-+"
-
-        lines.append(separator)
-        lines.append(header)
-        lines.append(separator)
-
-        # Rows
+        # Data rows
         for row in rows:
-            values = []
-            for col in columns:
-                value = row[col]
-                value_str = str(value) if value is not None else ""
-                values.append(value_str.ljust(widths[col]))
-            lines.append("| " + " | ".join(values) + " |")
+            values = [row[col] if row[col] is not None else "" for col in columns]
+            writer.writerow(values)
 
-        lines.append(separator)
-
-        table = "\n".join(lines)
-        return f"```\n{table}\n```"
+        csv_data = output.getvalue().strip()
+        return f"```\n{csv_data}\n```"
 
     def register_handlers(self, bot):
         """Register Slack command handlers."""
