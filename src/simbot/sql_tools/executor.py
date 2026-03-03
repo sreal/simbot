@@ -196,12 +196,12 @@ class QueryExecutor:
                 except (TypeError, ValueError):
                     return f"Parameter '{p.name}' must be an integer."
             elif p.type == "date":
-                # Accept YYYY-MM-DD strings
+                # Accept YYYY-MM-DD strings, convert to date object for SQL Server
                 from datetime import datetime
 
                 try:
                     if isinstance(raw_value, str):
-                        datetime.strptime(raw_value, "%Y-%m-%d")
+                        params[p.name] = datetime.strptime(raw_value, "%Y-%m-%d").date()
                     else:
                         # Allow date/datetime objects; they are already validated
                         str(raw_value)
