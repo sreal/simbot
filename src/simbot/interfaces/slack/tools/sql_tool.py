@@ -107,29 +107,29 @@ class DomainSQLTool(Tool):
         return "\n".join(parts)
 
     def _format_table(self, rows: List[Dict]) -> str:
-        """Format rows as CSV."""
+        """Format rows as CSV with proper quoting."""
         if not rows:
             return "No results"
+
+        import io
+        import csv
 
         # Get column names from first row
         columns = list(rows[0].keys())
 
-        # Build CSV
-        lines = []
+        # Build CSV with proper quoting
+        output = io.StringIO()
+        writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
 
         # Header row
-        lines.append(",".join(columns))
+        writer.writerow(columns)
 
         # Data rows
         for row in rows:
-            values = []
-            for col in columns:
-                value = row[col]
-                value_str = str(value) if value is not None else ""
-                values.append(value_str)
-            lines.append(",".join(values))
+            values = [row[col] if row[col] is not None else "" for col in columns]
+            writer.writerow(values)
 
-        csv_data = "\n".join(lines)
+        csv_data = output.getvalue().strip()
         return f"```\n{csv_data}\n```"
 
     def register_handlers(self, bot):
