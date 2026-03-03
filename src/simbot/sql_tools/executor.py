@@ -197,15 +197,20 @@ class QueryExecutor:
                     return f"Parameter '{p.name}' must be an integer."
             elif p.type == "date":
                 # Accept YYYY-MM-DD strings, convert to datetime object for SQL Server
-                # Use datetime (not date) to include time component for DATETIME columns
+                # Converts to datetime with midnight time (00:00:00) to work with both
+                # DATE and DATETIME/DATETIME2 columns in SQL Server. The ODBC driver
+                # and SQL Server will handle type coercion appropriately.
                 from datetime import datetime
 
                 try:
                     if isinstance(raw_value, str):
                         params[p.name] = datetime.strptime(raw_value, "%Y-%m-%d")
+                    elif isinstance(raw_value, (datetime,)):
+                        # Already a datetime, keep as-is
+                        pass
                     else:
-                        # Allow date/datetime objects; they are already validated
-                        str(raw_value)
+                        # Try to convert other types to string first
+                        params[p.name] = datetime.strptime(str(raw_value), "%Y-%m-%d")
                 except Exception:
                     return (
                         f"Parameter '{p.name}' must be a date in YYYY-MM-DD format."
