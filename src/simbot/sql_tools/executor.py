@@ -191,6 +191,9 @@ class QueryExecutor:
 
             if p.type == "int":
                 try:
+                    # Strip surrounding quotes before converting (users might type '123')
+                    if isinstance(raw_value, str):
+                        raw_value = raw_value.strip().strip("'\"")
                     # Coerce to int so downstream always sees correct type
                     params[p.name] = int(raw_value)
                 except (TypeError, ValueError):
@@ -200,24 +203,50 @@ class QueryExecutor:
                 # Converts to datetime with midnight time (00:00:00) to work with both
                 # DATE and DATETIME/DATETIME2 columns in SQL Server. The ODBC driver
                 # and SQL Server will handle type coercion appropriately.
-                from datetime import datetime
-
                 try:
                     if isinstance(raw_value, str):
-                        params[p.name] = datetime.strptime(raw_value, "%Y-%m-%d")
-                    elif isinstance(raw_value, (datetime,)):
+                        # Strip surrounding quotes (users often type '2026-02-01')
+                        cleaned = raw_value.strip().strip("'\"")
+                        params[p.name] = datetime.strptime(cleaned, "%Y-%m-%d")
+                    elif isinstance(raw_value, datetime):
                         # Already a datetime, keep as-is
                         pass
                     else:
                         # Try to convert other types to string first
-                        params[p.name] = datetime.strptime(str(raw_value), "%Y-%m-%d")
+                        cleaned = str(raw_value).strip().strip("'\"")
+                        params[p.name] = datetime.strptime(cleaned, "%Y-%m-%d")
                 except Exception:
                     return (
                         f"Parameter '{p.name}' must be a date in YYYY-MM-DD format."
                     )
             else:
-                # string - coerce everything to string for consistency
-                if raw_value is not None and not isinstance(raw_value, str):
+                # string type - but auto-detect date/datetime patterns for SQL Server compatibility
+                # This handles cases where YAML defines date params as type: string
+                if raw_value is not None and isinstance(raw_value, str):
+                    # Strip surrounding quotes (users often type '2026-02-01')
+                    cleaned = raw_value.strip().strip("'\"")
+                    
+                    # Auto-detect datetime patterns and convert for proper ODBC handling
+                    # This prevents SQL Server locale-dependent date parsing errors
+                    if re.match(r'^\d{4}-\d{2}-\d{2}$', cleaned):
+                        # Date only: YYYY-MM-DD
+                        try:
+                            params[p.name] = datetime.strptime(cleaned, "%Y-%m-%d")
+                        except ValueError:
+                            params[p.name] = cleaned  # Fall back to string if parse fails
+                    elif re.match(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}', cleaned):
+                        # Datetime with time: YYYY-MM-DD HH:MM:SS or YYYY-MM-DDTHH:MM:SS
+                        try:
+                            # Try ISO format first (with T separator)
+                            if 'T' in cleaned:
+                                params[p.name] = datetime.fromisoformat(cleaned)
+                            else:
+                                params[p.name] = datetime.strptime(cleaned[:19], "%Y-%m-%d %H:%M:%S")
+                        except ValueError:
+                            params[p.name] = cleaned  # Fall back to string if parse fails
+                    else:
+                        params[p.name] = cleaned
+                elif raw_value is not None:
                     params[p.name] = str(raw_value)
 
         return None
