@@ -191,6 +191,9 @@ class QueryExecutor:
 
             if p.type == "int":
                 try:
+                    # Strip surrounding quotes before converting (users might type '123')
+                    if isinstance(raw_value, str):
+                        raw_value = raw_value.strip().strip("'\"")
                     # Coerce to int so downstream always sees correct type
                     params[p.name] = int(raw_value)
                 except (TypeError, ValueError):
@@ -217,17 +220,28 @@ class QueryExecutor:
                         f"Parameter '{p.name}' must be a date in YYYY-MM-DD format."
                     )
             else:
-                # string type - but auto-detect date patterns for SQL Server compatibility
+                # string type - but auto-detect date/datetime patterns for SQL Server compatibility
                 # This handles cases where YAML defines date params as type: string
                 if raw_value is not None and isinstance(raw_value, str):
                     # Strip surrounding quotes (users often type '2026-02-01')
                     cleaned = raw_value.strip().strip("'\"")
                     
-                    # Auto-detect YYYY-MM-DD date pattern and convert to datetime
+                    # Auto-detect datetime patterns and convert for proper ODBC handling
                     # This prevents SQL Server locale-dependent date parsing errors
                     if re.match(r'^\d{4}-\d{2}-\d{2}$', cleaned):
+                        # Date only: YYYY-MM-DD
                         try:
                             params[p.name] = datetime.strptime(cleaned, "%Y-%m-%d")
+                        except ValueError:
+                            params[p.name] = cleaned  # Fall back to string if parse fails
+                    elif re.match(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}', cleaned):
+                        # Datetime with time: YYYY-MM-DD HH:MM:SS or YYYY-MM-DDTHH:MM:SS
+                        try:
+                            # Try ISO format first (with T separator)
+                            if 'T' in cleaned:
+                                params[p.name] = datetime.fromisoformat(cleaned)
+                            else:
+                                params[p.name] = datetime.strptime(cleaned[:19], "%Y-%m-%d %H:%M:%S")
                         except ValueError:
                             params[p.name] = cleaned  # Fall back to string if parse fails
                     else:
