@@ -247,12 +247,21 @@ class DomainSQLTool(Tool):
             )
             return True
 
-        # Format query list
+        # Format query list with usage
         lines = ["📊 Available Domain Queries:", ""]
         for q in sorted(queries, key=lambda x: x.trigger):
+            # Build usage string with parameters
+            usage = q.trigger
+            if q.parameters:
+                param_str = " ".join(
+                    f"<{p.name}>" if p.required else f"[{p.name}]"
+                    for p in q.parameters
+                )
+                usage = f"{q.trigger} {param_str}"
+
             # Get first line of description for brevity
             desc_first_line = q.description.split('\n')[0].strip()
-            lines.append(f"• `{q.trigger}` - {desc_first_line}")
+            lines.append(f"• `{usage}` - {desc_first_line}")
 
         say("\n".join(lines), channel=channel, thread_ts=thread_ts)
         return True
@@ -369,12 +378,21 @@ class DomainSQLTool(Tool):
         lines.append("• `clear cache <query|all>` - Clear query result cache")
         lines.append("• `reload queries` - Reload query definitions")
 
-        # Add all domain queries
+        # Add all domain queries with usage
         queries = self.query_loader.get_all_queries()
         for q in sorted(queries, key=lambda x: x.trigger):
+            # Build usage string with parameters
+            usage = q.trigger
+            if q.parameters:
+                param_str = " ".join(
+                    f"<{p.name}>" if p.required else f"[{p.name}]"
+                    for p in q.parameters
+                )
+                usage = f"{q.trigger} {param_str}"
+
             # Get first line of description for brevity
             desc_first_line = q.description.split('\n')[0].strip()
-            lines.append(f"• `{q.trigger}` - {desc_first_line}")
+            lines.append(f"• `{usage}` - {desc_first_line}")
 
         return "\n".join(lines)
 
