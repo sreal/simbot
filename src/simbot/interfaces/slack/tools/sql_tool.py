@@ -1,10 +1,12 @@
 """Domain SQL Tool - Execute pre-defined SQL queries from YAML definitions."""
 
+import csv
+import io
 import logging
 import re
 import uuid
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from simbot.tools.base import Tool
 from simbot.sql_tools import (
@@ -14,7 +16,6 @@ from simbot.sql_tools import (
     QueryResult,
     CompositeQueryExecutor,
     CompositeQueryDefinition,
-    CompositeQueryResult,
 )
 
 
@@ -32,117 +33,131 @@ class DomainSQLTool(Tool):
         self.query_loader = QueryLoader()
         self.executor = QueryExecutor()
         self.composite_executor = CompositeQueryExecutor(self.executor, self.query_loader)
+        # Set in register_handlers; needed for files_upload_v2 (the say()
+        # callable from slack_bolt cannot upload files).
+        self.app = None
 
-    def execute(self, query_id: str, params: dict, user_id: str = None) -> dict:
-        """
-        Execute domain query.
-
-        Args:
-            query_id: Query identifier
-            params: Parameter values
-            user_id: User ID for audit logging
-
-        Returns:
-            {
-                'success': bool,
-                'result': formatted result string,
-                'error': str | None,
-                'metadata': {...}
-            }
-        """
-        query_def = self.query_loader.get_query_by_id(query_id)
-        if not query_def:
-            return {
-                "success": False,
-                "error": f"Unknown query: {query_id}",
-                "metadata": {},
-            }
-
-        # Create execution context
-        context = ExecutionContext(
-            correlation_id=str(uuid.uuid4()),
-            interface='slack',
-            user_id=user_id
-        )
-
-        # Execute query
-        result: QueryResult = self.executor.execute(query_def, params, context)
-
-        # Format result for display
-        if result.success:
-            formatted = self._format_result_data(result, query_def.name, params)
-            return {
-                "success": True,
-                "result": formatted,
-                "metadata": result.metadata,
-                "correlation_id": result.correlation_id,
-            }
-        else:
-            return {
-                "success": False,
-                "error": result.error,
-                "metadata": result.metadata,
-                "correlation_id": result.correlation_id,
-            }
-
-    def _format_result_data(self, result: QueryResult, query_name: str, params: dict) -> str:
-        """Format query result for Slack display."""
-        # Build parameter display
-        if params:
-            if len(params) == 1:
-                param_display = f"`{list(params.values())[0]}`"
-            else:
-                param_parts = [f"{k}=`{v}`" for k, v in params.items()]
-                param_display = ", ".join(param_parts)
-            parts = [f"**{query_name}** for {param_display}:"]
-        else:
-            parts = [f"**{query_name}**:"]
-
-        # Format data
-        if result.data is None:
-            parts.append("\nNo results")
-        else:
-            parts.append("")
-            parts.append(self._format_table(result.data))
-
-        # Add cache info if from cache
-        if result.metadata.get("from_cache"):
-            cached_at = result.metadata["cached_at"]
-            cached_time = datetime.fromtimestamp(cached_at).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-            parts.append(f"\n[cached: {cached_time}]")
-
-        return "\n".join(parts)
-
-    def _format_table(self, rows: List[Dict]) -> str:
-        """Format rows as CSV with proper quoting."""
-        if not rows:
-            return "No results"
-
-        import io
-        import csv
-
-        # Get column names from first row
+    @staticmethod
+    def _format_csv_text(rows: List[Dict]) -> str:
+        """Build a CSV string (header + rows) from a list of dicts."""
         columns = list(rows[0].keys())
 
-        # Build CSV with proper quoting
         output = io.StringIO()
         writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
-
-        # Header row
         writer.writerow(columns)
-
-        # Data rows
         for row in rows:
-            values = [row[col] if row[col] is not None else "" for col in columns]
-            writer.writerow(values)
+            writer.writerow(
+                [row[col] if row[col] is not None else "" for col in columns]
+            )
+        return output.getvalue()
 
-        csv_data = output.getvalue().strip()
-        return f"```\n{csv_data}\n```"
+    @classmethod
+    def _format_csv_bytes(cls, rows: List[Dict]) -> bytes:
+        """UTF-8 encoded CSV ready to hand to files_upload_v2."""
+        return cls._format_csv_text(rows).encode("utf-8")
+
+    _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+    _NON_BASE_RE = re.compile(r"[^a-z0-9]+")
+    _NON_PARAM_RE = re.compile(r"[^a-z0-9]+")
+
+    @classmethod
+    def _slug_base(cls, value: str) -> str:
+        """Slug for the query name component: lowercase, non-alnum -> '_', collapse runs."""
+        slug = cls._NON_BASE_RE.sub("_", value.lower()).strip("_")
+        return slug or "query"
+
+    @classmethod
+    def _slug_param(cls, value) -> str:
+        """Slug for one parameter value: shorten UUIDs, slug other values, cap length."""
+        if value is None:
+            return ""
+        s = str(value).strip()
+        if not s:
+            return ""
+        if cls._UUID_RE.match(s):
+            return s.lower().split("-", 1)[0]  # first 8 hex chars
+        slug = cls._NON_PARAM_RE.sub("-", s.lower()).strip("-")
+        if not slug:
+            return ""
+        if len(slug) > 24:
+            slug = slug[:24].rstrip("-")
+        return slug
+
+    @classmethod
+    def _build_csv_filename(
+        cls,
+        base: str,
+        params: dict,
+        sub_label: Optional[str] = None,
+    ) -> str:
+        """Build a Slack-friendly CSV filename.
+
+        Examples:
+          base="version_synapse", params={"VersionID": "DBB7EC81-...-..."}
+            -> 'simbot_version_synapse_dbb7ec81.csv'
+          base="version_sync", params={"VersionID": "..."}, sub_label="cloud"
+            -> 'simbot_version_sync_cloud_dbb7ec81.csv'
+        """
+        parts = ["simbot", cls._slug_base(base)]
+        if sub_label:
+            parts.append(cls._slug_base(sub_label))
+
+        param_slugs = [cls._slug_param(v) for v in (params or {}).values()]
+        param_slugs = [p for p in param_slugs if p]
+        if param_slugs:
+            parts.append("_".join(param_slugs))
+
+        name = "_".join(p for p in parts if p) + ".csv"
+
+        # Slack max filename length is 255 — truncate the param tail if needed.
+        if len(name) > 255:
+            head = "_".join(parts[:-1]) + "_"
+            tail_budget = 255 - len(head) - 4  # leave room for ".csv"
+            tail = parts[-1][: max(0, tail_budget)].rstrip("-_")
+            name = (head + tail + ".csv") if tail else (head.rstrip("_") + ".csv")
+        return name
+
+    @staticmethod
+    def _cache_annotated(comment: str, result: QueryResult) -> str:
+        """Append a '(cached: ...)' suffix when the result came from cache."""
+        if not result.metadata.get("from_cache"):
+            return comment
+        cached_at = result.metadata.get("cached_at")
+        if cached_at is None:
+            return f"{comment} _(cached)_"
+        cached_time = datetime.fromtimestamp(cached_at).strftime("%Y-%m-%d %H:%M:%S")
+        return f"{comment} _(cached: {cached_time})_"
+
+    def _upload_csv(
+        self,
+        *,
+        channel: str,
+        thread_ts: Optional[str],
+        base: str,
+        params: dict,
+        rows: List[Dict],
+        title: str,
+        comment: str,
+        sub_label: Optional[str] = None,
+    ) -> None:
+        """Upload a CSV file to Slack with a clean filename."""
+        if self.app is None:
+            raise RuntimeError(
+                "DomainSQLTool.app is not set; register_handlers must run before file upload."
+            )
+        filename = self._build_csv_filename(base, params, sub_label=sub_label)
+        self.app.client.files_upload_v2(
+            channel=channel,
+            content=self._format_csv_text(rows),
+            filename=filename,
+            title=title,
+            initial_comment=comment,
+            thread_ts=thread_ts,
+        )
 
     def register_handlers(self, bot):
         """Register Slack command handlers."""
+        self.app = bot.app
         bot.command_handlers["domain_query"] = self._handle_query
         bot.command_handlers["domain_queries_list"] = self._handle_list_queries
         bot.command_handlers["domain_cache_clear"] = self._handle_clear_cache
@@ -214,22 +229,21 @@ class DomainSQLTool(Tool):
         # Get user ID
         user_id = event.get("user")
 
-        # Execute query
-        result = self.execute(query_id, params, user_id)
+        # Execute query directly so we have the raw QueryResult (data rows
+        # for the CSV upload, plus metadata for the cache annotation).
+        context = ExecutionContext(
+            correlation_id=str(uuid.uuid4()),
+            interface='slack',
+            user_id=user_id,
+        )
+        result: QueryResult = self.executor.execute(query_def, params, context)
 
-        # Send response
-        if result["success"]:
-            say(
-                result["result"],
-                channel=channel,
-                thread_ts=thread_ts,
-            )
-        else:
-            error_msg = result['error']
-            correlation_id = result.get('correlation_id')
-            if correlation_id:
+        if not result.success:
+            error_msg = result.error
+            cid = result.correlation_id
+            if cid:
                 say(
-                    f"❌ Error: {error_msg}\n🔍 Correlation ID: {correlation_id}",
+                    f"❌ Error: {error_msg}\n🔍 Correlation ID: {cid}",
                     channel=channel,
                     thread_ts=thread_ts,
                 )
@@ -239,7 +253,25 @@ class DomainSQLTool(Tool):
                     channel=channel,
                     thread_ts=thread_ts,
                 )
+            return True
 
+        if not result.data:
+            say(
+                f"*{query_def.name}*: _No results_",
+                channel=channel,
+                thread_ts=thread_ts,
+            )
+            return True
+
+        self._upload_csv(
+            channel=channel,
+            thread_ts=thread_ts,
+            base=query_def.mcp.name if query_def.mcp else query_def.trigger,
+            params=params,
+            rows=result.data,
+            title=query_def.name,
+            comment=self._cache_annotated(f"*{query_def.name}*", result),
+        )
         return True
 
     def _handle_composite_query(
@@ -284,53 +316,60 @@ class DomainSQLTool(Tool):
 
         result = self.composite_executor.execute(composite_def, params, context)
 
+        # Short header message; sub-results follow as file uploads (or text
+        # fallbacks for empty/failed sub-queries).
         say(
-            self._format_composite_result(composite_def, params, result),
+            f"*{composite_def.name}*",
             channel=channel,
             thread_ts=thread_ts,
         )
-        return True
 
-    def _format_composite_result(
-        self,
-        composite_def: CompositeQueryDefinition,
-        params: dict,
-        result: CompositeQueryResult,
-    ) -> str:
-        """Render a composite result: header line plus one block per sub-query."""
-        if params:
-            if len(params) == 1:
-                param_display = f"`{list(params.values())[0]}`"
-            else:
-                param_parts = [f"{k}=`{v}`" for k, v in params.items()]
-                param_display = ", ".join(param_parts)
-            parts = [f"**{composite_def.name}** for {param_display}:"]
-        else:
-            parts = [f"**{composite_def.name}**:"]
+        composite_base = (
+            composite_def.mcp.name if composite_def.mcp else composite_def.trigger
+        )
 
         for sub in composite_def.queries:
             sub_result = result.sub_results.get(sub.label)
-            parts.append("")
-            parts.append(f"*{sub.label}*")
 
             if sub_result is None:
-                parts.append(":warning: missing sub-result")
+                say(
+                    f"*{sub.label}*: :warning: missing sub-result",
+                    channel=channel,
+                    thread_ts=thread_ts,
+                )
                 continue
 
             if not sub_result.success:
                 err = sub_result.error or "unknown error"
                 cid = sub_result.correlation_id or ""
                 cid_suffix = f" (correlation: {cid})" if cid else ""
-                parts.append(f":warning: {err}{cid_suffix}")
+                say(
+                    f"*{sub.label}*: :warning: {err}{cid_suffix}",
+                    channel=channel,
+                    thread_ts=thread_ts,
+                )
                 continue
 
             if not sub_result.data:
-                parts.append("_No results_")
+                say(
+                    f"*{sub.label}*: _No results_",
+                    channel=channel,
+                    thread_ts=thread_ts,
+                )
                 continue
 
-            parts.append(self._format_table(sub_result.data))
+            self._upload_csv(
+                channel=channel,
+                thread_ts=thread_ts,
+                base=composite_base,
+                params=params,
+                rows=sub_result.data,
+                title=f"{composite_def.name} – {sub.label}",
+                comment=self._cache_annotated(f"*{sub.label}*", sub_result),
+                sub_label=sub.label,
+            )
 
-        return "\n".join(parts)
+        return True
 
     def _handle_list_queries(self, text, event, say, channel, thread_ts):
         """
