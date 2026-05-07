@@ -29,6 +29,21 @@ parameters:
     type: string
 ```
 
+Use `bind_from` when one user input needs to fill multiple `?` placeholders.
+The derived param is invisible to Slack and MCP — the user supplies the
+source param once:
+```yaml
+sql: "SELECT * FROM t WHERE name LIKE '%' + ? + '%' OR id = ?"
+parameters:
+  - name: Search
+    type: string
+    required: true
+  - name: SearchExact
+    type: string
+    required: true
+    bind_from: Search
+```
+
 ### Blob Checks
 Create a YAML file in `queries/` starting with `blob_` (e.g., `blob_check_*.yaml`):
 ```yaml
