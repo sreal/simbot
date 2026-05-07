@@ -5,9 +5,13 @@ from .models import (
     QueryDefinition,
     QueryResult,
     ExecutionContext,
+    CompositeSubQuery,
+    CompositeQueryDefinition,
+    CompositeQueryResult,
 )
 from .executor import QueryExecutor
 from .loader import QueryLoader
+from .composite_executor import CompositeQueryExecutor
 
 __all__ = [
     "QueryParameter",
@@ -17,4 +21,8 @@ __all__ = [
     "ExecutionContext",
     "QueryExecutor",
     "QueryLoader",
+    "CompositeSubQuery",
+    "CompositeQueryDefinition",
+    "CompositeQueryResult",
+    "CompositeQueryExecutor",
 ]

@@ -16,9 +16,14 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
 
-from simbot.sql_tools import QueryLoader, QueryExecutor, ExecutionContext
+from simbot.sql_tools import (
+    QueryLoader,
+    QueryExecutor,
+    ExecutionContext,
+    CompositeQueryExecutor,
+)
 from simbot.blob_tools import BlobCheckLoader, BlobCheckExecutor
-from .converters import YAMLToMCPConverter
+from .converters import YAMLToMCPConverter, CompositeToMCPConverter
 from .blob_converters import BlobToMCPConverter
 
 
@@ -35,6 +40,12 @@ class SQLQueryMCPServer:
         self.query_loader = QueryLoader()
         self.sql_executor = QueryExecutor()
         self.sql_converter = YAMLToMCPConverter()
+
+        # Composite tools (share the QueryLoader and QueryExecutor)
+        self.composite_executor = CompositeQueryExecutor(
+            self.sql_executor, self.query_loader
+        )
+        self.composite_converter = CompositeToMCPConverter()
 
         # Blob tools
         self.blob_loader = BlobCheckLoader()
@@ -92,6 +103,14 @@ class SQLQueryMCPServer:
             tool['metadata']['tool_type'] = 'blob'
             tools[tool['name']] = tool
 
+        # Composite tools
+        composite_tools = self.composite_converter.convert_all(
+            self.query_loader.composites
+        )
+        for tool in composite_tools:
+            tool['metadata']['tool_type'] = 'composite'
+            tools[tool['name']] = tool
+
         return tools
 
     def _register_handlers(self):
@@ -138,6 +157,8 @@ class SQLQueryMCPServer:
 
             if tool_type == 'blob':
                 return await self._execute_blob_tool(tool_def, arguments, context)
+            elif tool_type == 'composite':
+                return await self._execute_composite_tool(tool_def, arguments, context)
             else:
                 return await self._execute_sql_tool(tool_def, arguments, context)
 
@@ -180,6 +201,30 @@ class SQLQueryMCPServer:
         return [types.TextContent(
             type="text",
             text=json.dumps(response, indent=2, default=str)
+        )]
+
+    async def _execute_composite_tool(
+        self,
+        tool_def: Dict[str, Any],
+        arguments: dict,
+        context: ExecutionContext
+    ) -> list[types.TextContent]:
+        """Execute a composite tool: fan out to referenced sub-queries."""
+        composite_id = tool_def['metadata']['composite_id']
+        composite_def = self.query_loader.get_composite_by_id(composite_id)
+        if not composite_def:
+            error_msg = f"Composite not found: {composite_id}"
+            logger.error(error_msg)
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({'error': error_msg, 'success': False})
+            )]
+
+        result = self.composite_executor.execute(composite_def, arguments, context)
+
+        return [types.TextContent(
+            type="text",
+            text=json.dumps(result.to_dict(), indent=2, default=str)
         )]
 
     async def _execute_blob_tool(
@@ -413,6 +458,18 @@ class SQLQueryMCPServer:
                                     'error_code': result.error_code,
                                     'correlation_id': result.correlation_id,
                                 }
+                        elif tool_type == 'composite':
+                            composite_id = tool_def['metadata']['composite_id']
+                            composite_def = self.query_loader.get_composite_by_id(composite_id)
+                            if not composite_def:
+                                return JSONResponse({
+                                    'jsonrpc': '2.0',
+                                    'id': message_id,
+                                    'error': {'code': -32602, 'message': f'Composite not found: {composite_id}'}
+                                })
+
+                            result = self.composite_executor.execute(composite_def, arguments, context)
+                            response_data = result.to_dict()
                         else:
                             # Execute SQL query
                             query_id = tool_def['metadata']['query_id']

@@ -3,7 +3,7 @@ Domain models for SQL query execution.
 Provides type-safe configuration and result handling.
 """
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 
 
@@ -89,6 +89,46 @@ class QueryDefinition(BaseModel):
         return self
 
 
+class CompositeSubQuery(BaseModel):
+    """One referenced sub-query inside a composite definition."""
+    model_config = ConfigDict(extra='forbid')
+
+    label: str = Field(..., description="Unique key inside the composite; appears in MCP JSON and Slack section heading")
+    ref: str = Field(..., description="Query id (YAML stem) of an existing SQL query")
+    params: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapping from referenced query's parameter names to template strings. Use '{Name}' to substitute a composite-level parameter.",
+    )
+
+
+class CompositeQueryDefinition(BaseModel):
+    """Composite query: fans out to multiple referenced SQL queries."""
+    model_config = ConfigDict(extra='forbid')
+
+    name: str
+    description: str
+    trigger: str
+    enabled: bool = True
+    type: Literal["composite"]
+    parameters: List[QueryParameter] = Field(default_factory=list)
+    queries: List[CompositeSubQuery]
+    cache_ttl_seconds: int = 0
+    mcp: Optional[MCPConfig] = None
+
+    @model_validator(mode='after')
+    def validate_unique_labels(self):
+        labels = [q.label for q in self.queries]
+        if len(labels) != len(set(labels)):
+            raise ValueError("Composite sub-query labels must be unique")
+        return self
+
+    @model_validator(mode='after')
+    def validate_at_least_one_subquery(self):
+        if not self.queries:
+            raise ValueError("Composite must reference at least one sub-query")
+        return self
+
+
 @dataclass
 class QueryResult:
     """
@@ -116,6 +156,23 @@ class QueryResult:
             'error': self.error,
             'error_code': self.error_code,
             'metadata': self.metadata,
+            'correlation_id': self.correlation_id,
+        }
+
+
+@dataclass
+class CompositeQueryResult:
+    """Result of composite execution: one QueryResult per labelled sub-query."""
+    success: bool
+    composite_name: str
+    sub_results: Dict[str, QueryResult] = field(default_factory=dict)
+    correlation_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'success': self.success,
+            'composite_name': self.composite_name,
+            'sub_results': {k: v.to_dict() for k, v in self.sub_results.items()},
             'correlation_id': self.correlation_id,
         }
 

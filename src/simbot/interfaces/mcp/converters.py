@@ -2,7 +2,7 @@
 Convert domain query definitions to MCP tool schemas.
 """
 from typing import Dict, List, Any
-from simbot.sql_tools import QueryDefinition
+from simbot.sql_tools import QueryDefinition, CompositeQueryDefinition
 
 
 # Tool grouping configuration
@@ -120,4 +120,75 @@ class YAMLToMCPConverter:
                 # Log but don't fail entire conversion
                 import logging
                 logging.error(f"Failed to convert query {query_id}: {e}")
+        return tools
+
+
+class CompositeToMCPConverter:
+    """Converts CompositeQueryDefinition to MCP tool schema.
+
+    Schema is built from the composite's own user-facing parameters; sub-query
+    parameters are not exposed (they are filled by the composite executor via
+    the YAML's params: mapping).
+    """
+
+    def convert(self, composite_id: str, composite_def: CompositeQueryDefinition) -> Dict[str, Any]:
+        if composite_def.mcp and composite_def.mcp.name:
+            tool_name = composite_def.mcp.name
+        else:
+            tool_name = composite_def.trigger.replace(" ", "_").lower()
+
+        group = (composite_def.mcp.group if composite_def.mcp else None) or 'ungrouped'
+
+        namespaced_name = f"{group}.{tool_name}"
+
+        if composite_def.mcp and composite_def.mcp.description:
+            description = composite_def.mcp.description
+        else:
+            description = composite_def.description
+
+        properties = {}
+        required = []
+
+        for param in composite_def.parameters:
+            json_type = {
+                'string': 'string',
+                'int': 'integer',
+                'date': 'string',
+            }.get(param.type, 'string')
+
+            properties[param.name] = {
+                'type': json_type,
+                'description': f"{param.name} ({param.type})",
+            }
+
+            if json_type == 'string' and param.type == 'date':
+                properties[param.name]['format'] = 'date'
+                properties[param.name]['description'] += ' in YYYY-MM-DD format'
+
+            if param.required:
+                required.append(param.name)
+
+        return {
+            'name': namespaced_name,
+            'description': description,
+            'inputSchema': {
+                'type': 'object',
+                'properties': properties,
+                'required': required,
+            },
+            'metadata': {
+                'group': group,
+                'composite_id': composite_id,
+                'cache_ttl': composite_def.cache_ttl_seconds,
+            },
+        }
+
+    def convert_all(self, composites: Dict[str, CompositeQueryDefinition]) -> List[Dict[str, Any]]:
+        tools = []
+        for composite_id, composite_def in composites.items():
+            try:
+                tools.append(self.convert(composite_id, composite_def))
+            except Exception as e:
+                import logging
+                logging.error(f"Failed to convert composite {composite_id}: {e}")
         return tools

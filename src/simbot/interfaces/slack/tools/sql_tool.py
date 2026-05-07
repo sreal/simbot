@@ -7,7 +7,15 @@ from datetime import datetime
 from typing import List, Dict
 
 from simbot.tools.base import Tool
-from simbot.sql_tools import QueryLoader, QueryExecutor, ExecutionContext, QueryResult
+from simbot.sql_tools import (
+    QueryLoader,
+    QueryExecutor,
+    ExecutionContext,
+    QueryResult,
+    CompositeQueryExecutor,
+    CompositeQueryDefinition,
+    CompositeQueryResult,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +31,7 @@ class DomainSQLTool(Tool):
         )
         self.query_loader = QueryLoader()
         self.executor = QueryExecutor()
+        self.composite_executor = CompositeQueryExecutor(self.executor, self.query_loader)
 
     def execute(self, query_id: str, params: dict, user_id: str = None) -> dict:
         """
@@ -154,6 +163,12 @@ class DomainSQLTool(Tool):
         query_def = self.query_loader.get_query_by_trigger(text)
 
         if not query_def:
+            # Try composite triggers before giving up
+            composite_def = self.query_loader.get_composite_by_trigger(text)
+            if composite_def:
+                return self._handle_composite_query(
+                    composite_def, text, event, say, channel, thread_ts
+                )
             return False  # Not a domain query
 
         # Find query_id from loader
@@ -227,6 +242,96 @@ class DomainSQLTool(Tool):
 
         return True
 
+    def _handle_composite_query(
+        self,
+        composite_def: CompositeQueryDefinition,
+        text: str,
+        event: dict,
+        say,
+        channel,
+        thread_ts,
+    ) -> bool:
+        """Run a composite query and render each sub-result as its own block."""
+        trigger_len = len(composite_def.trigger)
+        remaining = text[trigger_len:].strip()
+
+        # Composite-level params are user-facing; no bind_from at composite layer.
+        param_names = [p.name for p in composite_def.parameters]
+        required_param_names = [
+            p.name for p in composite_def.parameters if p.required
+        ]
+
+        if not remaining and required_param_names:
+            say(
+                f"❌ {composite_def.description}",
+                channel=channel,
+                thread_ts=thread_ts,
+            )
+            return True
+
+        tokens = remaining.split()
+        params = {
+            name: tokens[i]
+            for i, name in enumerate(param_names)
+            if i < len(tokens)
+        }
+
+        context = ExecutionContext(
+            correlation_id=str(uuid.uuid4()),
+            interface='slack',
+            user_id=event.get("user"),
+        )
+
+        result = self.composite_executor.execute(composite_def, params, context)
+
+        say(
+            self._format_composite_result(composite_def, params, result),
+            channel=channel,
+            thread_ts=thread_ts,
+        )
+        return True
+
+    def _format_composite_result(
+        self,
+        composite_def: CompositeQueryDefinition,
+        params: dict,
+        result: CompositeQueryResult,
+    ) -> str:
+        """Render a composite result: header line plus one block per sub-query."""
+        if params:
+            if len(params) == 1:
+                param_display = f"`{list(params.values())[0]}`"
+            else:
+                param_parts = [f"{k}=`{v}`" for k, v in params.items()]
+                param_display = ", ".join(param_parts)
+            parts = [f"**{composite_def.name}** for {param_display}:"]
+        else:
+            parts = [f"**{composite_def.name}**:"]
+
+        for sub in composite_def.queries:
+            sub_result = result.sub_results.get(sub.label)
+            parts.append("")
+            parts.append(f"*{sub.label}*")
+
+            if sub_result is None:
+                parts.append(":warning: missing sub-result")
+                continue
+
+            if not sub_result.success:
+                err = sub_result.error or "unknown error"
+                cid = sub_result.correlation_id or ""
+                cid_suffix = f" (correlation: {cid})" if cid else ""
+                parts.append(f":warning: {err}{cid_suffix}")
+                continue
+
+            if not sub_result.data:
+                parts.append("_No results_")
+                continue
+
+            parts.append(self._format_table(sub_result.data))
+
+        return "\n".join(parts)
+
     def _handle_list_queries(self, text, event, say, channel, thread_ts):
         """
         Handle listing available queries.
@@ -249,25 +354,34 @@ class DomainSQLTool(Tool):
             )
             return True
 
+        composites = self.query_loader.get_all_composites()
+
         # Format query list with usage
         lines = ["📊 Available Domain Queries:", ""]
-        for q in sorted(queries, key=lambda x: x.trigger):
-            # Build usage string with parameters (skip derived bind_from)
-            usage = q.trigger
-            visible_params = [p for p in q.parameters if p.bind_from is None]
-            if visible_params:
-                param_str = " ".join(
-                    f"<{p.name}>" if p.required else f"[{p.name}]"
-                    for p in visible_params
-                )
-                usage = f"{q.trigger} {param_str}"
-
-            # Get first line of description for brevity
-            desc_first_line = q.description.split('\n')[0].strip()
-            lines.append(f"• `{usage}` - {desc_first_line}")
+        combined = list(queries) + list(composites)
+        for q in sorted(combined, key=lambda x: x.trigger):
+            lines.append(f"• `{self._format_usage(q)}` - {self._first_line(q.description)}")
 
         say("\n".join(lines), channel=channel, thread_ts=thread_ts)
         return True
+
+    @staticmethod
+    def _format_usage(definition) -> str:
+        """Build '<trigger> <ParamA> [ParamB]' usage hint for a query or composite."""
+        visible_params = [
+            p for p in definition.parameters if getattr(p, 'bind_from', None) is None
+        ]
+        if not visible_params:
+            return definition.trigger
+        param_str = " ".join(
+            f"<{p.name}>" if p.required else f"[{p.name}]"
+            for p in visible_params
+        )
+        return f"{definition.trigger} {param_str}"
+
+    @staticmethod
+    def _first_line(text: str) -> str:
+        return (text or "").split('\n')[0].strip()
 
     def _handle_clear_cache(self, text, event, say, channel, thread_ts):
         """
@@ -299,20 +413,40 @@ class DomainSQLTool(Tool):
             if not query_def:
                 query_def = self.query_loader.get_query_by_trigger(target)
 
-            if not query_def:
+            if query_def:
+                count = self.executor.clear_cache(query_def.name)
                 say(
-                    f"❌ Unknown query: {target}",
+                    f"✅ Cache cleared for: {query_def.name} ({count} entries)",
                     channel=channel,
                     thread_ts=thread_ts,
                 )
                 return True
 
-            count = self.executor.clear_cache(query_def.name)
+            # Try composite — clear each referenced sub-query's cache
+            composite_def = self.query_loader.get_composite_by_id(target)
+            if not composite_def:
+                composite_def = self.query_loader.get_composite_by_trigger(target)
+
+            if composite_def:
+                total = 0
+                for sub in composite_def.queries:
+                    sub_def = self.query_loader.get_query_by_id(sub.ref)
+                    if sub_def is not None:
+                        total += self.executor.clear_cache(sub_def.name)
+                say(
+                    f"✅ Cache cleared for composite: {composite_def.name} "
+                    f"({total} entries across {len(composite_def.queries)} sub-queries)",
+                    channel=channel,
+                    thread_ts=thread_ts,
+                )
+                return True
+
             say(
-                f"✅ Cache cleared for: {query_def.name} ({count} entries)",
+                f"❌ Unknown query: {target}",
                 channel=channel,
                 thread_ts=thread_ts,
             )
+            return True
 
         return True
 
@@ -381,22 +515,12 @@ class DomainSQLTool(Tool):
         lines.append("• `clear cache <query|all>` - Clear query result cache")
         lines.append("• `reload queries` - Reload query definitions")
 
-        # Add all domain queries with usage
+        # Add all domain queries and composites with usage
         queries = self.query_loader.get_all_queries()
-        for q in sorted(queries, key=lambda x: x.trigger):
-            # Build usage string with parameters (skip derived bind_from)
-            usage = q.trigger
-            visible_params = [p for p in q.parameters if p.bind_from is None]
-            if visible_params:
-                param_str = " ".join(
-                    f"<{p.name}>" if p.required else f"[{p.name}]"
-                    for p in visible_params
-                )
-                usage = f"{q.trigger} {param_str}"
-
-            # Get first line of description for brevity
-            desc_first_line = q.description.split('\n')[0].strip()
-            lines.append(f"• `{usage}` - {desc_first_line}")
+        composites = self.query_loader.get_all_composites()
+        combined = list(queries) + list(composites)
+        for q in sorted(combined, key=lambda x: x.trigger):
+            lines.append(f"• `{self._format_usage(q)}` - {self._first_line(q.description)}")
 
         return "\n".join(lines)
 
@@ -404,12 +528,14 @@ class DomainSQLTool(Tool):
         """Check tool health."""
         try:
             query_count = len(self.query_loader.queries)
+            composite_count = len(self.query_loader.composites)
             cache_count = len(self.executor.cache)
 
             return {
                 "healthy": True,
                 "details": {
                     "queries_loaded": query_count,
+                    "composites_loaded": composite_count,
                     "cache_entries": cache_count,
                 },
             }
