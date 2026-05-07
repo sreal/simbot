@@ -600,3 +600,74 @@ class TestErrorBoundary:
         assert result.correlation_id == "success-test-123"
         assert result.data == [{"col": "value"}]
         assert result.metadata.get('from_cache') is True
+
+
+class TestBindFrom:
+    """Tests for bind_from parameter feature."""
+
+    def _query_def(self, parameters):
+        return QueryDefinition(
+            name="Test",
+            description="Test query",
+            trigger="test",
+            database="db",
+            credentials_env_key="DB_TEST",
+            sql="SELECT * FROM t WHERE name LIKE ? OR id = ?",
+            parameters=parameters,
+        )
+
+    def test_valid_bind_from(self):
+        query_def = self._query_def([
+            {"name": "Search", "type": "string", "required": True},
+            {"name": "SearchExact", "type": "string",
+             "required": True, "bind_from": "Search"},
+        ])
+        assert query_def.parameters[1].bind_from == "Search"
+
+    def test_bind_from_unknown_param_rejected(self):
+        with pytest.raises(ValidationError):
+            self._query_def([
+                {"name": "Search", "type": "string", "required": True},
+                {"name": "Other", "type": "string",
+                 "required": True, "bind_from": "DoesNotExist"},
+            ])
+
+    def test_bind_from_self_rejected(self):
+        with pytest.raises(ValidationError):
+            self._query_def([
+                {"name": "Search", "type": "string",
+                 "required": True, "bind_from": "Search"},
+            ])
+
+    def test_bind_from_chain_rejected(self):
+        with pytest.raises(ValidationError):
+            self._query_def([
+                {"name": "A", "type": "string", "required": True},
+                {"name": "B", "type": "string",
+                 "required": True, "bind_from": "A"},
+                {"name": "C", "type": "string",
+                 "required": True, "bind_from": "B"},
+            ])
+
+    def test_validation_skips_bind_from_params(self):
+        executor = QueryExecutor()
+        query_def = self._query_def([
+            {"name": "Search", "type": "string", "required": True},
+            {"name": "SearchExact", "type": "string",
+             "required": True, "bind_from": "Search"},
+        ])
+        # User only supplies the source param — derived must not be flagged.
+        assert executor._validate_parameters(
+            query_def, {"Search": "acme"}
+        ) is None
+
+    def test_validation_still_catches_missing_source(self):
+        executor = QueryExecutor()
+        query_def = self._query_def([
+            {"name": "Search", "type": "string", "required": True},
+            {"name": "SearchExact", "type": "string",
+             "required": True, "bind_from": "Search"},
+        ])
+        error = executor._validate_parameters(query_def, {})
+        assert error is not None
+        assert "Search" in error

@@ -171,8 +171,10 @@ class DomainSQLTool(Tool):
         trigger_len = len(query_def.trigger)
         remaining = text[trigger_len:].strip()
 
-        # Get required parameter names
-        required_params = [p.name for p in query_def.parameters if p.required]
+        # User-supplied params only — derived (bind_from) params are filled
+        # by the executor at bind time, not by the user.
+        user_params = [p for p in query_def.parameters if p.bind_from is None]
+        required_params = [p.name for p in user_params if p.required]
 
         if not remaining and required_params:
             # Missing parameters
@@ -186,8 +188,8 @@ class DomainSQLTool(Tool):
         # Split remaining text into tokens (simple positional parsing)
         tokens = remaining.split()
 
-        # Map tokens to parameters
-        param_names = [p.name for p in query_def.parameters]
+        # Map tokens to user-supplied parameters
+        param_names = [p.name for p in user_params]
         params = {}
 
         for i, param_name in enumerate(param_names):
@@ -250,12 +252,13 @@ class DomainSQLTool(Tool):
         # Format query list with usage
         lines = ["📊 Available Domain Queries:", ""]
         for q in sorted(queries, key=lambda x: x.trigger):
-            # Build usage string with parameters
+            # Build usage string with parameters (skip derived bind_from)
             usage = q.trigger
-            if q.parameters:
+            visible_params = [p for p in q.parameters if p.bind_from is None]
+            if visible_params:
                 param_str = " ".join(
                     f"<{p.name}>" if p.required else f"[{p.name}]"
-                    for p in q.parameters
+                    for p in visible_params
                 )
                 usage = f"{q.trigger} {param_str}"
 
@@ -381,12 +384,13 @@ class DomainSQLTool(Tool):
         # Add all domain queries with usage
         queries = self.query_loader.get_all_queries()
         for q in sorted(queries, key=lambda x: x.trigger):
-            # Build usage string with parameters
+            # Build usage string with parameters (skip derived bind_from)
             usage = q.trigger
-            if q.parameters:
+            visible_params = [p for p in q.parameters if p.bind_from is None]
+            if visible_params:
                 param_str = " ".join(
                     f"<{p.name}>" if p.required else f"[{p.name}]"
-                    for p in q.parameters
+                    for p in visible_params
                 )
                 usage = f"{q.trigger} {param_str}"
 

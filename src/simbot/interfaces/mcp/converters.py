@@ -70,6 +70,11 @@ class YAMLToMCPConverter:
         required = []
 
         for param in query_def.parameters:
+            # Derived params (bind_from) are filled at bind time, never by the
+            # MCP caller — keep them out of the schema.
+            if param.bind_from is not None:
+                continue
+
             # Map domain types to JSON Schema types
             json_type = {
                 'string': 'string',

@@ -167,9 +167,15 @@ class QueryExecutor:
         - All required parameters are present
         - Values conform to declared types (string/int/date)
 
+        Parameters with bind_from are filled at bind time from another
+        parameter's value and are never expected from the caller.
+
         Returns error message if validation fails, None otherwise.
         """
-        required = [p for p in query_def.parameters if p.required]
+        required = [
+            p for p in query_def.parameters
+            if p.required and p.bind_from is None
+        ]
         missing = [p.name for p in required if p.name not in params]
 
         if missing:
@@ -178,8 +184,10 @@ class QueryExecutor:
                 f"{', '.join(missing)}. {query_def.description}"
             )
 
-        # Type validation
+        # Type validation (skip bind_from params — they inherit type at bind)
         for p in query_def.parameters:
+            if p.bind_from is not None:
+                continue  # value resolved from source param later
             if p.name not in params:
                 continue  # optional and not provided
 
@@ -286,21 +294,25 @@ class QueryExecutor:
             # Count ? placeholders in SQL
             placeholder_count = query_def.sql.count('?')
 
-            # Get parameter values in order
-            param_names = [p.name for p in query_def.parameters]
+            # Resolve param values: derived params (bind_from) take their
+            # value from the referenced parameter at bind time.
+            def resolve(p):
+                if p.bind_from is not None:
+                    return params.get(p.bind_from)
+                return params.get(p.name)
 
             # Simple 1:1 mapping - placeholders must match parameters
-            if placeholder_count == 0 and len(param_names) == 0:
+            if placeholder_count == 0 and len(query_def.parameters) == 0:
                 # No parameters needed
                 param_values = ()
-            elif placeholder_count == len(param_names):
-                # Expected case: one placeholder per parameter
-                param_values = tuple(params.get(name) for name in param_names)
+            elif placeholder_count == len(query_def.parameters):
+                # Expected case: one placeholder per parameter (incl. derived)
+                param_values = tuple(resolve(p) for p in query_def.parameters)
             else:
                 # Mismatch - fail fast with clear error
                 raise ValueError(
                     f"Query '{query_def.name}': SQL has {placeholder_count} placeholders "
-                    f"but {len(param_names)} parameters defined. "
+                    f"but {len(query_def.parameters)} parameters defined. "
                     f"Each parameter should have exactly one placeholder (?)."
                 )
 

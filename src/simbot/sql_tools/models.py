@@ -4,7 +4,7 @@ Provides type-safe configuration and result handling.
 """
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 
 
 class QueryParameter(BaseModel):
@@ -12,6 +12,14 @@ class QueryParameter(BaseModel):
     name: str
     type: str = Field(..., description="string, int, or date")
     required: bool = True
+    bind_from: Optional[str] = Field(
+        None,
+        description=(
+            "If set, the parameter takes its value from another parameter at "
+            "bind time instead of being supplied by the caller. Use this to "
+            "reuse a single user input across multiple ? placeholders."
+        ),
+    )
 
     @field_validator('type')
     @classmethod
@@ -56,6 +64,29 @@ class QueryDefinition(BaseModel):
         if not v.strip():
             raise ValueError("SQL cannot be empty")
         return v.strip()
+
+    @model_validator(mode='after')
+    def validate_bind_from_references(self):
+        names = {p.name for p in self.parameters}
+        derived = {p.name for p in self.parameters if p.bind_from is not None}
+        for p in self.parameters:
+            if p.bind_from is None:
+                continue
+            if p.bind_from == p.name:
+                raise ValueError(
+                    f"Parameter '{p.name}' has bind_from referencing itself"
+                )
+            if p.bind_from not in names:
+                raise ValueError(
+                    f"Parameter '{p.name}' has bind_from='{p.bind_from}' "
+                    f"but no parameter with that name is defined"
+                )
+            if p.bind_from in derived:
+                raise ValueError(
+                    f"Parameter '{p.name}' bind_from='{p.bind_from}' points to "
+                    f"another bind_from parameter; chains are not supported"
+                )
+        return self
 
 
 @dataclass
